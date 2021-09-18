@@ -1,0 +1,5 @@
+# blank seperated one line per rule:
+#   <linux_username> <quote_hours_per_month>
+
+nobody 3000
+yesbody 1500

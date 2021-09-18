@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+  <head>
+    <title>Kimi mo Sodayo!</title>
+    <meta charset="utf-8">
+    <meta></meta>
+    <script></script>
+  </head>
+
+  <body>
+    <article>
+      <!-- 主数据框图 -->
+      <section style="background-color: aliceblue; width: 66.6666%; float: left;">
+        <h1>Runtime Monitor</h1>
+        <div>
+          <ul>在这里画图：
+            <li>每个host一个大box，内嵌每个gpu一个小box、cpu单独一个小box</li>
+            <li>基础是个时间横轴的折线图：红-GPU/CPU利用率，绿-显存/内存利用率，黄-温度</li>
+            <li>在上面再覆盖画矩形，表示一个task，点击可查看详情:(username,command,timespan(start,end))</li>
+          </ul>
+          <div style="height: 400px;">
+            <img src="meta/web ui sketch.png" width="75%">
+          </div>
+        </div>
+        
+        <hr/>
+    
+        <h1>ReAlloc!</h1>
+        <div>
+          <form>
+            <p>I wanna <input type="number" value="1" min="0" max="16"> GPUs! <input type="submit" value="Go!"></p>
+          </form>
+        </div>
+      </section>
+
+      <!-- 右侧栏 -->
+      <aside style="background-color: antiquewhite; width: 33.3333%; float: right">
+        <h1>User Stats</h1>
+        <div>
+          <p>
+            时间段: 从 <input type="date"> 至今
+          </p>
+
+          <ul>在这里显示每个用户的统计量：
+            <li>用户名</li>
+            <li>剩余额度/总额度</li>
+            <li>平均任务耗时</li>
+            <li>一般的活跃时间段(就统计一下他的任务占时的直方图高频度的前50%)</li>
+          </ul>
+          <p>点击用户名，过滤左侧的图表，使得只显示该用户的任务蓝框</p>
+          <p>点击(作为dummy的) All users，取消该过滤</p>
+        </div>
+      </aside>
+    </article>
+  </body>
+</html>
