@@ -3,6 +3,7 @@
 # Create Time: 2021/09/16 
 
 from dataclasses import dataclass, asdict
+from types import FunctionType
 from typing import Dict, List, Union
 
 from utils import now_ts
@@ -86,12 +87,12 @@ class ReplyPacket(ResponsePacket):
 # short hand factory for ResponsePackets
 class RESPONSE:
 
-  OK =             lambda data=None: packet_to_dict(ReplyPacket(status_code=200, reason='OK', ts=now_ts(), data=data))
-  BAD_REQUEST =           lambda: packet_to_dict(ResponsePacket(status_code=400, reason='Bad Request', ts=now_ts()))
-  UNAUTHORIZED =          lambda: packet_to_dict(ResponsePacket(status_code=401, reason='Unauthorized', ts=now_ts()))
-  NOT_ACCEPTABLE = lambda data=None: packet_to_dict(ReplyPacket(status_code=406, reason='Not Acceptable', ts=now_ts(), data=data))
-  INTERNAL_SERVER_ERROR = lambda: packet_to_dict(ResponsePacket(status_code=500, reason='Internal Server Error', ts=now_ts()))
-  NOT_IMPLEMENTED =       lambda: packet_to_dict(ResponsePacket(status_code=501, reason='Not Implemented', ts=now_ts()))
+  OK =             lambda data=None: ReplyPacket(status_code=200, reason='OK', ts=now_ts(), data=data)
+  BAD_REQUEST =           lambda: ResponsePacket(status_code=400, reason='Bad Request', ts=now_ts())
+  UNAUTHORIZED =          lambda: ResponsePacket(status_code=401, reason='Unauthorized', ts=now_ts())
+  NOT_ACCEPTABLE = lambda data=None: ReplyPacket(status_code=406, reason='Not Acceptable', ts=now_ts(), data=data)
+  INTERNAL_SERVER_ERROR = lambda: ResponsePacket(status_code=500, reason='Internal Server Error', ts=now_ts())
+  NOT_IMPLEMENTED =       lambda: ResponsePacket(status_code=501, reason='Not Implemented', ts=now_ts())
 
 
 # packet optimize
@@ -100,5 +101,14 @@ def dict_remove_nullval(d:dict) -> dict:
   for k in ks: del d[k]
   return d
 
-def packet_to_dict(packet:Packet):
-  return dict_remove_nullval(asdict(packet))
+def packet_to_dict(packet:Union[Packet, FunctionType]) -> dict:
+  if isinstance(packet, Packet):
+    return dict_remove_nullval(asdict(packet))
+  elif isinstance(packet, FunctionType):
+    def wrapper(*args, **kwargs):
+      return packet_to_dict(packet(*args, **kwargs))
+    return wrapper
+  else: raise ValueError
+
+def make_reason(reason:str) -> dict:
+  return {'reason': reason}

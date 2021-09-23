@@ -5,6 +5,7 @@
 import os
 import re
 import logging
+from shutil import copy2
 from logging.handlers import TimedRotatingFileHandler
 from time import time
 from datetime import datetime
@@ -13,7 +14,7 @@ from collections import deque
 import lzma
 import pickle as pkl
 from importlib import reload as reload_module
-from typing import List, Tuple, NamedTuple
+from typing import List, Tuple
 from traceback import format_exc
 
 import settings as hp
@@ -41,7 +42,7 @@ LONG_LOGFMT  = logging.Formatter("%(asctime)s %(levelname)s %(filename)s:%(linen
 SHORT_LOGFMT = logging.Formatter("[%(levelname)s] %(filename)s:%(lineno)s %(message)s")
 logger = None
 
-def init_logger(endpoint:str='client', debug_mode=hp.DEBUG_MODE):
+def init_logger(endpoint:str='client'):
   global logger
 
   if endpoint not in ['client', 'server']: raise ValueError
@@ -57,13 +58,14 @@ def init_logger(endpoint:str='client', debug_mode=hp.DEBUG_MODE):
   lf.setLevel(logging.WARN)
   logger.addHandler(lf)
 
-  if debug_mode:
+  if hp.ENABLE_ACCESS_LOG:
     lf = TimedRotatingFileHandler(os.path.join(hp.LOG_PATH, f'{endpoint}-access.log'), encoding='utf8',
                                   when='D', interval=7, backupCount=10)
     lf.setFormatter(LONG_LOGFMT)
     lf.setLevel(logging.INFO)
     logger.addHandler(lf)
 
+  if hp.DEBUG_MODE:
     con = logging.StreamHandler()
     con.setFormatter(SHORT_LOGFMT)
     con.setLevel(logging.DEBUG)
@@ -102,36 +104,51 @@ def sock_to_hostport(sock:Tuple[str, int]) -> str:
 # data file read/write
 DUMPABLE_TYPES = (list, dict, set, deque)
 
-class Record(NamedTuple):   # interface for stdata record classes
-  
-  ts: int                   # record created timestamp (general purpose)
+class Record:                 # interface for stdata record classes
 
-class Records:              # interface for stdata manager classes
-
-  # db_file:str = None      # auto set by metaclass
-  objects:list = [ ]        # [Record], NOTE: length truncated by `STDATA_TRUNCATE_EXPIRE`
+  # db_file:str = None        # auto set by metaclass
+  objects: List[dict] = [ ]   # NOTE: length truncated by `STDATA_TRUNCATE_EXPIRE`
   
   @classmethod
-  def load(cls): raise NotImplemented
+  def load(cls):
+    try:
+      if os.path.exists(cls.db_file):
+        cls.objects = load_pkl(cls.db_file)
+        logger.debug(f'   load {cls.db_file}')
+    except Exception:
+      logger.error(format_exc())
 
   @classmethod
-  def save(cls): raise NotImplemented
+  def save(cls):
+    try:
+      save_pkl(cls.objects, cls.db_file)
+      logger.debug(f'   dump {cls.db_file}')
+    except Exception:
+      logger.error(format_exc())
 
-class RecordsMeta(type):    # metaclass for stdata manager classes
+  @classmethod
+  def add(cls, obj:dict):
+    cls.objects.append(obj)
+
+class RecordMeta(type):       # metaclass for stdata record classes
   
-  objects = set()           # save regitered manager classes
+  objects = set()             # save regitered record classes
 
   def __init__(cls:type, name, bases, _dict):
     super().__init__(name, bases, _dict)
-    RecordsMeta.objects.add(cls)
+    RecordMeta.objects.add(cls)
 
     # FIXME: currently we only consider persist stdata at server side, so filename without prefix
     os.makedirs(hp.DATA_PATH, exist_ok=True)
     setattr(cls, 'db_file', os.path.join(hp.DATA_PATH, f'{name}.pkl'))
 
 def load_pkl(fp:str) -> object:
-  with lzma.open(fp, 'rb') as fh:
-    return pkl.load(fh)
+  try:
+    with lzma.open(fp, 'rb') as fh:
+      return pkl.load(fh)
+  except Exception as e:
+    copy2(fp, f'{fp}.corrupted-{now_iso()}')
+    raise e
 
 def save_pkl(obj:object, fp:str):
   with lzma.open(fp, 'wb') as fh:
@@ -142,31 +159,47 @@ def load_rtdata(env:dict, prefix:str):
 
   os.makedirs(hp.DATA_PATH, exist_ok=True)
   try:
-    for var in env.keys():
+    for var in env:
       if var.endswith('_info') and isinstance(env[var], DUMPABLE_TYPES):
         fp = os.path.join(hp.DATA_PATH, f'{prefix}-{var}.pkl')
-        if os.path.exists(fp): env[var] = load_pkl(fp)
+        if os.path.exists(fp):
+          env[var] = load_pkl(fp)
+          logger.debug(f'   load {fp}')
   except:
-    logger.error(format_exc())
+    logger.fatal(format_exc())
+    exit(-1)
 
 def dump_rtdata(env:dict, prefix:str):
   logger.debug('[dump_rtdata]')
 
   try:
-    for var in env.keys():
+    for var in env:
       if var.endswith('_info') and isinstance(env[var], DUMPABLE_TYPES):
-        save_pkl(env[var], os.path.join(hp.DATA_PATH, f'{prefix}-{var}.pkl'))
+        fp = os.path.join(hp.DATA_PATH, f'{prefix}-{var}.pkl')
+        save_pkl(env[var], fp)
+        logger.debug(f'   dump {fp}')
   except:
     logger.error(format_exc())
 
 def load_stdata():
-  for rec in RecordsMeta.objects:
-    rec.load()
+  logger.debug('[load_stdata]')
+
+  try:
+    for rec in RecordMeta.objects:
+      rec.load()
+  except:
+    logger.fatal(format_exc())
+    exit(-1)
 
 def dump_stdata():
-  for rec in RecordsMeta.objects:
-    rec.save()
-
+  logger.debug('[dump_stdata]')
+  
+  try:
+    for rec in RecordMeta.objects:
+      rec.save()
+  except:
+    logger.fatal(format_exc())
+    exit(-1)
 
 # shell execute
 def execute(cmd:str) -> List[str]:

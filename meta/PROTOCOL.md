@@ -132,7 +132,7 @@ while True:
     save_coredump(rtdata)
     # try to clear out zombies
     for cli in registered_clis:
-      if cli not in SLAVES_SOCKET and now() - cli.last_ACK_info > DYNAMIC_UNREGISTER_WAIT:
+      if cli not in SLAVES_SOCKET and now() - cli.last_ACK_info > HAERTBEAT_INTERVAL * 30:
         registered_clis.remove(cli)
 ```
 

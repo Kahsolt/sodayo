@@ -36,7 +36,7 @@ def run(modname):
     print_exc()
     exit(-3)
 
-  # gogogo!  
+  # gogogo!
   run_module(modname, run_name='__main__')
 
   # TODO:

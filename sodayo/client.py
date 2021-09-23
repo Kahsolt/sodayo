@@ -4,9 +4,9 @@
 
 from time import sleep
 from socket import gethostname
-from threading import Timer, RLock
+from threading import Thread, Timer, RLock
 from traceback import format_exc
-from collections import deque
+from flask import json
 
 from requests import session
 from requests.exceptions import RequestException
@@ -37,7 +37,7 @@ __version__ = '0.1'     # 2021/09/18
 __role__ = 'client'
 
 http = session()
-lock = RLock()      # for r/w `runtime_current_info`
+lock = RLock()      # for r/w `runtime_info`
 hostname = gethostname()
 
 
@@ -46,7 +46,7 @@ hostname = gethostname()
 # NOTE: dumpable structs MUST named endswith '_info'
 #       tranferable structs MUST typed in [dict, list] (aka. JSON roots)
 
-hardware_info = {
+hardware_info = {             
   'hostname': 'server1',
   'gpu': [
     {
@@ -64,10 +64,10 @@ hardware_info = {
     'proc_num': 16,              # processor (aka. thread) count
     'clock_speed': 3677.23       # float in MHz
   },
-  'mem': 95161,                  # int in MB
+  'mem': 95161,             # int in MB
 }
 
-runtime_current_info = {
+runtime_info = {            # one frame of status query
   'gpu': [
     {
       'gpu_id': 0, 
@@ -92,14 +92,10 @@ runtime_current_info = {
     },
   ],
   'loadavg': 0.25,          # float
-  'cpu_usage': 75,          # int in percentage
+  'cpu_usage': 75.0,        # float in percentage
   'mem_free': 12345,        # int in MB
   'ts': 1631665845,         # int64 of timestamp
 }
-
-# deque of old (exclude current) `runtime_current_info` dict
-# NOTE: length truncated by `RTDATA_TRUNCATE_EXPIRE`
-runtime_info = deque()
 
 running_tasks_info = {
   10856: {                  # key is pid
@@ -114,17 +110,19 @@ running_tasks_info = {
 ##############################################################################
 # utils
 
+@perf_timer
 def startup():
   logger.info(f'[startup]')
 
   # clear fake demo data
   env = globals()
-  for var in env.keys():
+  for var in env:
     if var.endswith('_info') and isinstance(env[var], (list, dict)):
       env[var].clear()
 
   load_rtdata(globals(), prefix=__role__)
 
+@perf_timer
 def cleanup():
   logger.info(f'[cleanup]')
 
@@ -134,7 +132,7 @@ def cleanup():
 ##############################################################################
 # tasks
 
-@perf_timer
+@perf_timer        # ~= 0.15s
 def update_hardware_info():
   global hardware_info
   
@@ -163,7 +161,7 @@ def update_hardware_info():
   
   os_info = None
   try:
-    r = execute('lsb_release -a')
+    r = execute('lsb_release -a 2&> /dev/null')
     os_info = r[1].split('\t')[-1]
   except: pass
   hardware_info['os'] = os_info
@@ -192,21 +190,13 @@ def update_hardware_info():
 
   logger.debug(hardware_info)
 
-@perf_timer
+@perf_timer        # ~= 0.25s
 @with_lock(lock)
 def update_runtime_info() -> list:
-  global runtime_current_info
+  global runtime_info
 
   active_pids = [ ]   # collect info to return
 
-  # sanitize history
-  if runtime_current_info:
-    runtime_info.append(runtime_current_info.copy())
-  if len(runtime_info):
-    now_ts_freeze = now_ts()
-    while runtime_info[0]['ts'] + day_to_sec(hp.RTDATA_TRUNCATE_EXPIRE) < now_ts_freeze:
-      runtime_info.popleft()
-  
   # collect newest
   gpu_info = None
   try:
@@ -250,7 +240,7 @@ def update_runtime_info() -> list:
       
       gpu_info[-1]['procs'] = procs
   except: pass
-  runtime_current_info['gpu'] = gpu_info
+  runtime_info['gpu'] = gpu_info
 
   loadavg_info = None
   cpu_usage_info = None
@@ -260,8 +250,8 @@ def update_runtime_info() -> list:
     loadavg_info = float(r[0].split(',')[-3].split(':')[1])
     cpu_usage_info = 100.0 - float(r[2].split(',')[-5].strip().split(' ')[0])  # = 1.0 - `idle(%)`
   except: pass
-  runtime_current_info['loadavg'] = loadavg_info
-  runtime_current_info['cpu_usage'] = cpu_usage_info
+  runtime_info['loadavg'] = loadavg_info
+  runtime_info['cpu_usage'] = cpu_usage_info
 
   mem_free_info = None
   try:
@@ -269,11 +259,11 @@ def update_runtime_info() -> list:
     ss = whitespace_collapse(r[1]).split(' ')
     mem_free_info = int(ss[1]) - int(ss[2])    # = `total` - `used`
   except: pass
-  runtime_current_info['mem_free'] = mem_free_info
+  runtime_info['mem_free'] = mem_free_info
   
-  runtime_current_info['ts'] = now_ts()
+  runtime_info['ts'] = now_ts()
 
-  logger.debug(runtime_current_info)
+  logger.debug(runtime_info)
 
   return active_pids
 
@@ -281,7 +271,7 @@ def check_running_tasks(active_pids:list):
   # look for finished tasks
   tasks, dead_pids = [ ], [ ]
   now_ts_freeze = now_ts()
-  for pid in running_tasks_info.keys():
+  for pid in running_tasks_info:
     # NOTE: found finished task, let's keep an eye on it !
     if pid not in active_pids:
       tsk = running_tasks_info[pid]
@@ -291,24 +281,9 @@ def check_running_tasks(active_pids:list):
       dead_pids.append(pid)
   if tasks:
     for pid in dead_pids: del running_tasks_info[pid]
-    _post('stats', StatsPacket(type='tasks', tasks=tasks))
-
-def update_task(cli):
-  logger.info('[update_task]')
-  
-  check_running_tasks(update_runtime_info())
-
-  cli.update_timer = Timer(hp.UPDATE_INTERVAL, update_task, (cli,))
-  cli.update_timer.start()
-
-@with_lock(lock)
-def commit_task(cli):
-  logger.info('[commit_task]')
-
-  _post('stats', StatsPacket(type='runtime', runtime=runtime_current_info))
-
-  cli.commit_timer = Timer(hp.COMMIT_INTERVAL, commit_task, (cli,))
-  cli.commit_timer.start()
+    # TODO: locally keep a copy in case of long time network failure ?
+    # tasks info upload MUST be success ...
+    _post('stats', StatsPacket(type='tasks', tasks=tasks), retry_status_ok=-1)
 
 def heartbeat_task(cli):
   if hp.HERATBEAT_INTERVAL == -1: return
@@ -319,6 +294,28 @@ def heartbeat_task(cli):
   cli.heartbeat_timer = Timer(hp.HERATBEAT_INTERVAL, heartbeat_task, (cli,))
   cli.heartbeat_timer.start()
 
+def update_task(cli):
+  logger.info('[update_task]')
+  
+  active_pids = update_runtime_info()
+  if active_pids:
+    thr = Thread(target=check_running_tasks, args=(active_pids,))
+    thr.daemon = True       # FIXME: data will be lost if client crashed or got SIGINT
+    thr.start()
+
+  cli.update_timer = Timer(hp.UPDATE_INTERVAL, update_task, (cli,))
+  cli.update_timer.start()
+
+@with_lock(lock)
+def commit_task(cli):
+  logger.info('[commit_task]')
+
+  _post('stats', StatsPacket(type='runtime', runtime=runtime_info))
+
+  cli.commit_timer = Timer(hp.COMMIT_INTERVAL, commit_task, (cli,))
+  cli.commit_timer.start()
+
+@perf_timer        # ~= 0.1s
 def coredump_task(cli):
   logger.info('[coredump_task]')
 
@@ -327,20 +324,31 @@ def coredump_task(cli):
   cli.coredump_timer = Timer(min_to_sec(hp.COREDUMP_INTERVAL), coredump_task, (cli,))
   cli.coredump_timer.start()
 
-def _post(api:str, packet:Packet, retry=5):
+def _post(api:str, packet:Packet, retry_http=5, retry_status_ok=1):
   url = f'http://{sock_to_hostport(hp.MASTER_SOCKET)}/{api}'
-  data = packet_to_dict(packet)
-  HEADERS =  {
-    'User-Agent': 'sodayo-client',
-    #'Content-Type': 'application/json',    # NOTE: `data` is a dict rather than JSON string
-  }
+  jsondata = json.dumps(packet_to_dict(packet), ensure_ascii=False)
+  HEADERS =  { 'User-Agent': 'sodayo-client' }
   
-  for _ in range(retry):
+  def _try_post():
+    for _ in range(retry_http):
+      try:
+        logger.debug(f'[post] {url} with {jsondata}')
+        return http.post(url=url, headers=HEADERS, json=jsondata, timeout=30)
+      except RequestException: logger.error(format_exc())
+      except Exception as e:   raise e
+      sleep(hp.COMMIT_INTERVAL // 2)
+
+  retrial = retry_status_ok
+  while retrial != 0:
+    if retry_status_ok != -1: retrial -= 1
+    res = _try_post()
     try:
-      logger.debug(f'[post] {url} with {data}')
-      return http.post(url=url, headers=HEADERS, data=data)
-    except RequestException: logger.error(format_exc())
-    except Exception as e:   raise e
+      status_code = res.json().get('status_code')
+      ok = res and (status_code == 200)
+      if ok: return res
+      logger.warning(f'[post] request not ok {status_code}: {res.json().get("reason")}')
+    except:
+      logger.error(format_exc())
     sleep(hp.COMMIT_INTERVAL)
 
 
@@ -351,22 +359,18 @@ class Client:
 
   def __init__(self):
     # NOTE: names of timers MUST endswith '_timer'
-    self.update_timer     = Timer(0, update_task, (self,))
-    self.commit_timer     = Timer(hp.UPDATE_INTERVAL * 2, commit_task, (self,))
     self.heartbeat_timer  = Timer(hp.UPDATE_INTERVAL, heartbeat_task, (self,))
-    self.coredump_timer   = Timer(hp.COMMIT_INTERVAL * 2, coredump_task, (self,))
+    self.update_timer     = Timer(0,                  update_task,    (self,))
+    self.commit_timer     = Timer(hp.UPDATE_INTERVAL, commit_task,    (self,))
+    self.coredump_timer   = Timer(hp.COMMIT_INTERVAL, coredump_task,  (self,))
   
   def start(self):
     # first heartbeat MUST be success for register
-    ok = False
-    while not ok:
-      res = _post('heartbeat', HeartbeatPacket(hostname=hostname), retry=2147483647)
-      ok = res and (res.json().get('status_code') == 200)
-      if not ok: sleep(hp.COMMIT_INTERVAL // 4)
+    _post('heartbeat', HeartbeatPacket(hostname=hostname), retry_status_ok=-1)
 
     # hardware SHOULD be success
     update_hardware_info()
-    _post('stats', StatsPacket(type='hardware', hardware=hardware_info), retry=100)
+    _post('stats', StatsPacket(type='hardware', hardware=hardware_info), retry_status_ok=100)
 
     # now other timers can be started
     for var in dir(self):
